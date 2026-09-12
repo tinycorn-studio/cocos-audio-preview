@@ -1,0 +1,59 @@
+﻿{
+  "package_version": 2,
+  "version": "1.1.0",
+  "name": "auto-play-audio",
+  "description": "Tự động phát âm thanh khi click vào asset audio như trong Unity, có tùy chọn bật/tắt trên Inspector",
+  "author": "Tinycorn Studio",
+  "main": "./main.js",
+  "contributions": {
+    "menu": [
+      {
+        "path": "Develop/Audio Preview",
+        "label": "Toggle Auto-Play (Bật/Tắt)",
+        "message": "toggle-auto-play"
+      },
+      {
+        "path": "Develop/Audio Preview",
+        "label": "Stop Playing (Dừng phát)",
+        "message": "stop-audio"
+      }
+    ],
+    "inspector": {
+      "section": {
+        "asset": {
+          "audio-clip": "./inspector/audio-clip-section.js"
+        }
+      }
+    },
+    "profile": {
+      "editor": {
+        "autoPlay": {
+          "default": true
+        }
+      }
+    },
+    "messages": {
+      "selection:select": {
+        "methods": ["onSelectionSelect"]
+      },
+      "selection:activated": {
+        "methods": ["onSelectionActivated"]
+      },
+      "selection:unselect": {
+        "methods": ["onSelectionUnselect"]
+      },
+      "get-auto-play": {
+        "methods": ["getAutoPlay"]
+      },
+      "set-auto-play": {
+        "methods": ["setAutoPlay"]
+      },
+      "toggle-auto-play": {
+        "methods": ["toggleAutoPlay"]
+      },
+      "stop-audio": {
+        "methods": ["stopAudio"]
+      }
+    }
+  }
+}
