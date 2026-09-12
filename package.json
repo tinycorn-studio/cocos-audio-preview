@@ -1,8 +1,8 @@
 ﻿{
   "package_version": 2,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "name": "auto-play-audio",
-  "description": "Tự động phát âm thanh khi click vào asset audio như trong Unity, có tùy chọn bật/tắt trên Inspector",
+  "description": "Tự động phát âm thanh trên chính Inspector audio player như trong Unity",
   "author": "Tinycorn Studio",
   "main": "./main.js",
   "contributions": {
@@ -33,12 +33,6 @@
       }
     },
     "messages": {
-      "selection:select": {
-        "methods": ["onSelectionSelect"]
-      },
-      "selection:activated": {
-        "methods": ["onSelectionActivated"]
-      },
       "selection:unselect": {
         "methods": ["onSelectionUnselect"]
       },
