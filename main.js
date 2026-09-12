@@ -116,6 +116,74 @@ function stopBackground() {
     } catch (e) {}
 }
 
+/**
+ * Dừng toàn bộ âm thanh (cả background lẫn Inspector)
+ */
+function stopAudioAll() {
+    stopBackground();
+    if (typeof Editor !== 'undefined' && Editor.Message) {
+        Editor.Message.broadcast('auto-play-audio:stop');
+    }
+}
+
+/**
+ * Kiểm tra xem đường dẫn file có phải là file âm thanh hay không
+ */
+function isAudioFile(filePath) {
+    if (!filePath || typeof filePath !== 'string') return false;
+    const lower = filePath.toLowerCase();
+    return lower.endsWith('.mp3') || lower.endsWith('.wav') || lower.endsWith('.ogg') ||
+           lower.endsWith('.m4a') || lower.endsWith('.aac') || lower.endsWith('.flac');
+}
+
+/**
+ * Xử lý khi người dùng chọn/click vào một phần tử trong Editor
+ */
+async function handleSelection(type, current, all) {
+    if (!isAutoPlayEnabled) return;
+
+    let assetUuid = null;
+    if (type === 'asset') {
+        if (typeof current === 'string') {
+            assetUuid = current;
+        } else if (Array.isArray(current) && current.length > 0) {
+            assetUuid = current[0];
+        } else if (Array.isArray(all) && all.length > 0) {
+            assetUuid = all[0];
+        }
+    } else if (type === 'node') {
+        // Khi chọn node trong Scene/Hierarchy thì dừng âm thanh preview
+        stopAudioAll();
+        return;
+    }
+
+    // Nếu type không được truyền, kiểm tra qua Editor.Selection
+    if (!assetUuid && typeof Editor !== 'undefined' && Editor.Selection) {
+        const selected = Editor.Selection.getSelected('asset');
+        if (selected && selected.length > 0) {
+            assetUuid = selected[0];
+        }
+    }
+
+    if (assetUuid) {
+        try {
+            const assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+            if (assetInfo && (assetInfo.importer === 'audio-clip' || isAudioFile(assetInfo.file || assetInfo.source))) {
+                const filePath = assetInfo.file || assetInfo.source;
+                console.log(`[Auto Play Audio] 🎵 Auto-playing: ${assetInfo.name || assetUuid}`);
+                playBackground(filePath);
+                if (typeof Editor !== 'undefined' && Editor.Message) {
+                    Editor.Message.broadcast('auto-play-audio:play-asset', filePath);
+                }
+                return;
+            }
+        } catch (e) {}
+    }
+
+    // Nếu click vào asset không phải audio (ảnh, script, prefab...) thì dừng phát
+    stopAudioAll();
+}
+
 module.exports = {
     async load() {
         console.log('[Auto Play Audio] Extension đã sẵn sàng hoạt động.');
@@ -126,49 +194,39 @@ module.exports = {
     },
 
     unload() {
-        stopBackground();
+        stopAudioAll();
         if (playerWin && !playerWin.isDestroyed()) {
             playerWin.destroy();
             playerWin = null;
-        }
-        if (typeof Editor !== 'undefined' && Editor.Message) {
-            Editor.Message.broadcast('auto-play-audio:stop');
         }
         console.log('[Auto Play Audio] Extension đã được gỡ tải.');
     },
 
     methods: {
-        log(msg) {
-            console.log('[Auto Play Inspector]', msg);
+        async onSelectionSelect(type, current, all) {
+            await handleSelection(type, current, all);
+        },
+
+        async onSelectionActivated(type, current) {
+            await handleSelection(type, current, null);
+        },
+
+        onSelectionUnselect(type) {
+            if (type === 'asset') {
+                stopAudioAll();
+            }
         },
 
         playBackgroundAudio(filePath) {
             if (!isAutoPlayEnabled) return;
             console.log('[Auto Play Audio] 🎵 Background audio playing:', filePath);
             playBackground(filePath);
+            return true;
         },
 
         stopBackgroundAudio() {
             stopBackground();
-        },
-
-        onSelectionSelect(type, current, all) {
-            // Khi chọn asset, nếu không phải asset audio thì dừng âm thanh
-            if (type === 'node') {
-                stopBackground();
-                if (typeof Editor !== 'undefined' && Editor.Message) {
-                    Editor.Message.broadcast('auto-play-audio:stop');
-                }
-            }
-        },
-
-        onSelectionUnselect(type) {
-            if (type === 'asset') {
-                stopBackground();
-                if (typeof Editor !== 'undefined' && Editor.Message) {
-                    Editor.Message.broadcast('auto-play-audio:stop');
-                }
-            }
+            return true;
         },
 
         getAutoPlay() {
@@ -179,10 +237,7 @@ module.exports = {
             isAutoPlayEnabled = !!val;
             await saveProfile();
             if (!isAutoPlayEnabled) {
-                stopBackground();
-                if (typeof Editor !== 'undefined' && Editor.Message) {
-                    Editor.Message.broadcast('auto-play-audio:stop');
-                }
+                stopAudioAll();
             }
             if (typeof Editor !== 'undefined' && Editor.Message) {
                 Editor.Message.broadcast('auto-play-audio:changed', isAutoPlayEnabled);
@@ -202,11 +257,9 @@ module.exports = {
         },
 
         stopAudio() {
-            stopBackground();
-            if (typeof Editor !== 'undefined' && Editor.Message) {
-                Editor.Message.broadcast('auto-play-audio:stop');
-            }
+            stopAudioAll();
             console.log('[Auto Play Audio] Đã dừng âm thanh.');
+            return true;
         }
     }
 };

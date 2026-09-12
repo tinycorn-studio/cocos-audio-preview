@@ -1,19 +1,6 @@
 'use strict';
 
 /**
- * Gửi log sang main process để ghi nhận vào project.log
- */
-function sendLog(...args) {
-    const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-    console.log('[Auto Play Section]', msg);
-    try {
-        if (typeof Editor !== 'undefined' && Editor.Message) {
-            Editor.Message.send('auto-play-audio', 'log', msg);
-        }
-    } catch (e) {}
-}
-
-/**
  * Tìm phần tử <audio> của audio-clip.js trong Inspector panel
  * @param {object} panel Panel controller hiện tại
  * @returns {HTMLAudioElement|null}
@@ -73,120 +60,90 @@ function getAudioElement(panel) {
                document.querySelector('audio.audio') ||
                document.querySelector('audio');
     } catch (e) {
-        sendLog('Lỗi trong getAudioElement:', e);
         return null;
     }
 }
 
 /**
- * Phát âm thanh đồng bộ giữa Inspector progress bar và background player
+ * Đồng bộ hóa thanh tiến trình của Inspector preview khi phát âm thanh
  * @param {object} panel Controller section
- * @param {string} filePath Đường dẫn file âm thanh
  */
-function playAudioWithSync(panel, filePath) {
+function syncInspectorPlayer(panel) {
     if (!panel._isAutoPlayEnabled) return;
 
     let attempts = 0;
-    const maxAttempts = 10;
+    const maxAttempts = 12;
 
-    const tryStart = () => {
+    const trySync = () => {
         if (!panel._isAutoPlayEnabled) return;
 
         const audioEl = getAudioElement(panel);
         if (audioEl) {
             panel._currentAudioEl = audioEl;
 
-            // Xóa listener cũ trên phần tử audio này
+            // Xóa event listener cũ
             if (audioEl._autoPlayCleanup) {
                 audioEl._autoPlayCleanup();
             }
 
-            let isUsingBackgroundSound = false;
-
             const onPlay = () => {
-                // Nếu người dùng ấn nút Play trên native controls (phát có tiếng), dừng ngay background
+                // Nếu người dùng bấm play trên native controls có tiếng
                 if (!audioEl.muted) {
-                    Editor.Message.send('auto-play-audio', 'stop-background-audio');
-                    isUsingBackgroundSound = false;
-                }
-            };
-
-            const onEnded = () => {
-                Editor.Message.send('auto-play-audio', 'stop-background-audio');
-                isUsingBackgroundSound = false;
-            };
-
-            const onPause = () => {
-                // Nếu bị pause (người dùng bấm Pause trên inspector), dừng luôn background
-                if (isUsingBackgroundSound) {
-                    Editor.Message.send('auto-play-audio', 'stop-background-audio');
-                    isUsingBackgroundSound = false;
+                    try {
+                        Editor.Message.request('auto-play-audio', 'stop-background-audio');
+                    } catch (e) {}
                 }
             };
 
             const onVolumeChange = () => {
-                // Nếu người dùng bật âm thanh trên native player
-                if (!audioEl.muted && isUsingBackgroundSound) {
-                    Editor.Message.send('auto-play-audio', 'stop-background-audio');
-                    isUsingBackgroundSound = false;
+                if (!audioEl.muted) {
+                    try {
+                        Editor.Message.request('auto-play-audio', 'stop-background-audio');
+                    } catch (e) {}
                 }
             };
 
+            const onPause = () => {
+                try {
+                    Editor.Message.request('auto-play-audio', 'stop-background-audio');
+                } catch (e) {}
+            };
+
+            const onEnded = () => {
+                try {
+                    Editor.Message.request('auto-play-audio', 'stop-background-audio');
+                } catch (e) {}
+            };
+
             audioEl.addEventListener('play', onPlay);
-            audioEl.addEventListener('ended', onEnded);
-            audioEl.addEventListener('pause', onPause);
             audioEl.addEventListener('volumechange', onVolumeChange);
+            audioEl.addEventListener('pause', onPause);
+            audioEl.addEventListener('ended', onEnded);
 
             audioEl._autoPlayCleanup = () => {
                 audioEl.removeEventListener('play', onPlay);
-                audioEl.removeEventListener('ended', onEnded);
-                audioEl.removeEventListener('pause', onPause);
                 audioEl.removeEventListener('volumechange', onVolumeChange);
+                audioEl.removeEventListener('pause', onPause);
+                audioEl.removeEventListener('ended', onEnded);
             };
 
-            // Thử phát unmuted trước
-            audioEl.muted = false;
-            audioEl.currentTime = 0;
-
-            const playPromise = audioEl.play();
-            if (playPromise !== undefined) {
-                playPromise.then(() => {
-                    sendLog('Inspector audioEl.play() phát thành công trực tiếp!');
-                    // Dừng background player vì Inspector đã tự phát được
-                    Editor.Message.send('auto-play-audio', 'stop-background-audio');
-                }).catch((err) => {
-                    sendLog('Inspector audioEl bị Autoplay Policy chặn, dùng muted sync + background player.');
-                    // Chromium cho phép muted play 100% không cần user gesture:
-                    // Bật muted -> thanh tiến trình trên preview inspector CHẠY THEO!
-                    if (panel._isAutoPlayEnabled && panel._currentAudioEl === audioEl) {
-                        audioEl.muted = true;
-                        audioEl.currentTime = 0;
-                        audioEl.play().catch(() => {});
-
-                        // Phát tiếng qua background player đồng thời
-                        if (filePath) {
-                            isUsingBackgroundSound = true;
-                            Editor.Message.send('auto-play-audio', 'play-background-audio', filePath);
-                        }
-                    }
-                });
+            // Bật muted = true để Chromium cho phép phát ngay lập tức (không bị Autoplay Policy chặn)
+            // Nhờ đó thanh tiến trình (progress bar) trên Inspector preview chạy mượt mà!
+            if (panel._isAutoPlayEnabled) {
+                audioEl.muted = true;
+                audioEl.currentTime = 0;
+                audioEl.play().catch(() => {});
             }
             return;
         }
 
         attempts++;
         if (attempts < maxAttempts) {
-            setTimeout(tryStart, 30);
-        } else {
-            // Nếu không tìm thấy phần tử audio trong DOM, vẫn phát qua background
-            sendLog('Không tìm thấy audioEl trong DOM sau 10 lần thử, phát qua background player.');
-            if (panel._isAutoPlayEnabled && filePath) {
-                Editor.Message.send('auto-play-audio', 'play-background-audio', filePath);
-            }
+            setTimeout(trySync, 35);
         }
     };
 
-    setTimeout(tryStart, 30);
+    setTimeout(trySync, 35);
 }
 
 exports.template = /* html */`
@@ -240,11 +197,8 @@ exports.ready = function() {
         if (panel.$.checkbox) {
             panel.$.checkbox.value = panel._isAutoPlayEnabled;
         }
-        if (!panel._isAutoPlayEnabled) {
-            if (panel._currentAudioEl) {
-                panel._currentAudioEl.pause();
-            }
-            Editor.Message.send('auto-play-audio', 'stop-background-audio');
+        if (!panel._isAutoPlayEnabled && panel._currentAudioEl) {
+            panel._currentAudioEl.pause();
         }
     };
 
@@ -253,12 +207,16 @@ exports.ready = function() {
             panel._currentAudioEl.pause();
             panel._currentAudioEl.currentTime = 0;
         }
-        Editor.Message.send('auto-play-audio', 'stop-background-audio');
+    };
+
+    panel.onPlayAsset = () => {
+        syncInspectorPlayer(panel);
     };
 
     if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.addBroadcastListener) {
         Editor.Message.addBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
         Editor.Message.addBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
+        Editor.Message.addBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }
 
     // Toggle checkbox
@@ -270,7 +228,9 @@ exports.ready = function() {
                 panel._currentAudioEl.pause();
                 panel._currentAudioEl.currentTime = 0;
             }
-            Editor.Message.send('auto-play-audio', 'stop-background-audio');
+            try {
+                await Editor.Message.request('auto-play-audio', 'stop-background-audio');
+            } catch (e) {}
         }
         try {
             await Editor.Message.request('auto-play-audio', 'set-auto-play', panel._isAutoPlayEnabled);
@@ -281,18 +241,30 @@ exports.ready = function() {
     panel.$.checkbox.addEventListener('confirm', onToggle);
 
     // Nút Replay
-    panel.$.replayBtn.addEventListener('click', () => {
-        const filePath = panel.currentAsset && panel.currentAsset.file;
-        playAudioWithSync(panel, filePath);
+    panel.$.replayBtn.addEventListener('click', async () => {
+        const audioEl = getAudioElement(panel);
+        if (audioEl) {
+            panel._currentAudioEl = audioEl;
+            audioEl.muted = true;
+            audioEl.currentTime = 0;
+            audioEl.play().catch(() => {});
+        }
+        if (panel.currentAsset && panel.currentAsset.file) {
+            try {
+                await Editor.Message.request('auto-play-audio', 'play-background-audio', panel.currentAsset.file);
+            } catch (e) {}
+        }
     });
 
     // Nút Stop
-    panel.$.stopBtn.addEventListener('click', () => {
+    panel.$.stopBtn.addEventListener('click', async () => {
         if (panel._currentAudioEl) {
             panel._currentAudioEl.pause();
             panel._currentAudioEl.currentTime = 0;
         }
-        Editor.Message.send('auto-play-audio', 'stop-background-audio');
+        try {
+            await Editor.Message.request('auto-play-audio', 'stop-background-audio');
+        } catch (e) {}
     });
 };
 
@@ -313,19 +285,16 @@ exports.update = async function(assetList, metaList) {
         }
     } catch (e) {}
 
-    // Dừng âm thanh cũ nếu có
+    // Dừng âm thanh cũ trên inspector nếu có
     if (panel._currentAudioEl) {
         try {
             panel._currentAudioEl.pause();
             panel._currentAudioEl.currentTime = 0;
         } catch (e) {}
     }
-    Editor.Message.send('auto-play-audio', 'stop-background-audio');
 
-    // Kích hoạt auto play đồng bộ
-    if (panel.currentAsset && panel.currentAsset.file) {
-        playAudioWithSync(panel, panel.currentAsset.file);
-    }
+    // Kích hoạt đồng bộ hóa thanh tiến trình
+    syncInspectorPlayer(panel);
 };
 
 exports.close = function() {
@@ -337,10 +306,10 @@ exports.close = function() {
         } catch (e) {}
         panel._currentAudioEl = null;
     }
-    Editor.Message.send('auto-play-audio', 'stop-background-audio');
 
     if (panel.onAutoPlayChange && typeof Editor !== 'undefined' && Editor.Message && Editor.Message.removeBroadcastListener) {
         Editor.Message.removeBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
         Editor.Message.removeBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
+        Editor.Message.removeBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }
 };
