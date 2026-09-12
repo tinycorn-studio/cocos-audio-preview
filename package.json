@@ -1,6 +1,6 @@
-﻿{
+{
   "package_version": 2,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "name": "auto-play-audio",
   "description": "Tự động phát âm thanh trên chính Inspector audio player như trong Unity",
   "author": "Tinycorn Studio",
@@ -33,6 +33,9 @@
       }
     },
     "messages": {
+      "selection:select": {
+        "methods": ["onSelectionSelect"]
+      },
       "selection:unselect": {
         "methods": ["onSelectionUnselect"]
       },
@@ -47,6 +50,15 @@
       },
       "stop-audio": {
         "methods": ["stopAudio"]
+      },
+      "play-background-audio": {
+        "methods": ["playBackgroundAudio"]
+      },
+      "stop-background-audio": {
+        "methods": ["stopBackgroundAudio"]
+      },
+      "log": {
+        "methods": ["log"]
       }
     }
   }
