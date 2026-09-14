@@ -65,29 +65,53 @@ function getAudioElement(panel) {
 }
 
 /**
+ * Dừng phần tử audio cũ một cách an toàn (không trigger onPause → stop-background)
+ */
+function safePauseOld(panel) {
+    if (panel._currentAudioEl) {
+        // Xóa event listeners TRƯỚC KHI pause để tránh onPause gọi stop-background-audio
+        if (panel._currentAudioEl._autoPlayCleanup) {
+            panel._currentAudioEl._autoPlayCleanup();
+            panel._currentAudioEl._autoPlayCleanup = null;
+        }
+        try {
+            panel._currentAudioEl.pause();
+            panel._currentAudioEl.currentTime = 0;
+        } catch (e) {}
+    }
+}
+
+/**
  * Đồng bộ hóa thanh tiến trình của Inspector preview khi phát âm thanh
- * @param {object} panel Controller section
+ * Chỉ phát muted trên thẻ <audio> của Inspector để thanh progress bar chạy theo.
+ * Âm thanh thực tế được phát bởi background player trong main.js.
  */
 function syncInspectorPlayer(panel) {
     if (!panel._isAutoPlayEnabled) return;
 
     let attempts = 0;
-    const maxAttempts = 12;
+    const maxAttempts = 15;
 
     const trySync = () => {
         if (!panel._isAutoPlayEnabled) return;
 
         const audioEl = getAudioElement(panel);
         if (audioEl) {
+            // Dừng audio cũ an toàn (không trigger stop-background)
+            if (panel._currentAudioEl && panel._currentAudioEl !== audioEl) {
+                safePauseOld(panel);
+            }
+
             panel._currentAudioEl = audioEl;
 
-            // Xóa event listener cũ
+            // Xóa event listener cũ nếu cùng element
             if (audioEl._autoPlayCleanup) {
                 audioEl._autoPlayCleanup();
             }
 
-            const onPlay = () => {
-                // Nếu người dùng bấm play trên native controls có tiếng
+            // Chỉ lắng nghe sự kiện do NGƯỜI DÙNG tương tác trực tiếp trên native controls
+            const onUserPlay = () => {
+                // Người dùng bấm Play trên native controls (unmuted) → dừng background player
                 if (!audioEl.muted) {
                     try {
                         Editor.Message.request('auto-play-audio', 'stop-background-audio');
@@ -95,55 +119,48 @@ function syncInspectorPlayer(panel) {
                 }
             };
 
-            const onVolumeChange = () => {
-                if (!audioEl.muted) {
+            const onUserPause = () => {
+                // CHỈ dừng background nếu đây là pause do người dùng (không phải do code)
+                // Kiểm tra: nếu audio KHÔNG ở cuối (ended) và KHÔNG bị muted thì là user pause
+                if (!audioEl.muted && !audioEl.ended) {
                     try {
                         Editor.Message.request('auto-play-audio', 'stop-background-audio');
                     } catch (e) {}
                 }
-            };
-
-            const onPause = () => {
-                try {
-                    Editor.Message.request('auto-play-audio', 'stop-background-audio');
-                } catch (e) {}
             };
 
             const onEnded = () => {
+                // Bài nhạc kết thúc tự nhiên → dừng background player
                 try {
                     Editor.Message.request('auto-play-audio', 'stop-background-audio');
                 } catch (e) {}
             };
 
-            audioEl.addEventListener('play', onPlay);
-            audioEl.addEventListener('volumechange', onVolumeChange);
-            audioEl.addEventListener('pause', onPause);
+            audioEl.addEventListener('play', onUserPlay);
+            audioEl.addEventListener('pause', onUserPause);
             audioEl.addEventListener('ended', onEnded);
 
             audioEl._autoPlayCleanup = () => {
-                audioEl.removeEventListener('play', onPlay);
-                audioEl.removeEventListener('volumechange', onVolumeChange);
-                audioEl.removeEventListener('pause', onPause);
+                audioEl.removeEventListener('play', onUserPlay);
+                audioEl.removeEventListener('pause', onUserPause);
                 audioEl.removeEventListener('ended', onEnded);
             };
 
-            // Bật muted = true để Chromium cho phép phát ngay lập tức (không bị Autoplay Policy chặn)
-            // Nhờ đó thanh tiến trình (progress bar) trên Inspector preview chạy mượt mà!
-            if (panel._isAutoPlayEnabled) {
-                audioEl.muted = true;
-                audioEl.currentTime = 0;
-                audioEl.play().catch(() => {});
-            }
+            // Phát muted để thanh tiến trình chạy theo
+            // (Chromium cho phép muted play 100% mà không cần user gesture)
+            audioEl.muted = true;
+            audioEl.currentTime = 0;
+            audioEl.play().catch(() => {});
             return;
         }
 
         attempts++;
         if (attempts < maxAttempts) {
-            setTimeout(trySync, 35);
+            setTimeout(trySync, 40);
         }
     };
 
-    setTimeout(trySync, 35);
+    setTimeout(trySync, 50);
 }
 
 exports.template = /* html */`
@@ -191,22 +208,19 @@ exports.ready = function() {
     panel._isAutoPlayEnabled = true;
     panel._currentAudioEl = null;
 
-    // Lắng nghe sự kiện đổi trạng thái từ main process hoặc menu
+    // Lắng nghe broadcast từ main process
     panel.onAutoPlayChange = (enabled) => {
         panel._isAutoPlayEnabled = !!enabled;
         if (panel.$.checkbox) {
             panel.$.checkbox.value = panel._isAutoPlayEnabled;
         }
-        if (!panel._isAutoPlayEnabled && panel._currentAudioEl) {
-            panel._currentAudioEl.pause();
+        if (!panel._isAutoPlayEnabled) {
+            safePauseOld(panel);
         }
     };
 
     panel.onStopAudio = () => {
-        if (panel._currentAudioEl) {
-            panel._currentAudioEl.pause();
-            panel._currentAudioEl.currentTime = 0;
-        }
+        safePauseOld(panel);
     };
 
     panel.onPlayAsset = () => {
@@ -224,10 +238,7 @@ exports.ready = function() {
         const val = event.target ? event.target.value : panel.$.checkbox.value;
         panel._isAutoPlayEnabled = !!val;
         if (!panel._isAutoPlayEnabled) {
-            if (panel._currentAudioEl) {
-                panel._currentAudioEl.pause();
-                panel._currentAudioEl.currentTime = 0;
-            }
+            safePauseOld(panel);
             try {
                 await Editor.Message.request('auto-play-audio', 'stop-background-audio');
             } catch (e) {}
@@ -242,26 +253,18 @@ exports.ready = function() {
 
     // Nút Replay
     panel.$.replayBtn.addEventListener('click', async () => {
-        const audioEl = getAudioElement(panel);
-        if (audioEl) {
-            panel._currentAudioEl = audioEl;
-            audioEl.muted = true;
-            audioEl.currentTime = 0;
-            audioEl.play().catch(() => {});
-        }
         if (panel.currentAsset && panel.currentAsset.file) {
+            safePauseOld(panel);
             try {
                 await Editor.Message.request('auto-play-audio', 'play-background-audio', panel.currentAsset.file);
             } catch (e) {}
+            syncInspectorPlayer(panel);
         }
     });
 
     // Nút Stop
     panel.$.stopBtn.addEventListener('click', async () => {
-        if (panel._currentAudioEl) {
-            panel._currentAudioEl.pause();
-            panel._currentAudioEl.currentTime = 0;
-        }
+        safePauseOld(panel);
         try {
             await Editor.Message.request('auto-play-audio', 'stop-background-audio');
         } catch (e) {}
@@ -285,31 +288,22 @@ exports.update = async function(assetList, metaList) {
         }
     } catch (e) {}
 
-    // Dừng âm thanh cũ trên inspector nếu có
-    if (panel._currentAudioEl) {
-        try {
-            panel._currentAudioEl.pause();
-            panel._currentAudioEl.currentTime = 0;
-        } catch (e) {}
-    }
+    // Dừng audio cũ trên inspector an toàn (KHÔNG gọi stop-background-audio ở đây!
+    // vì main.js đã bắt đầu phát background audio trước khi Inspector update được gọi)
+    safePauseOld(panel);
 
-    // Kích hoạt đồng bộ hóa thanh tiến trình
+    // Đồng bộ thanh tiến trình (phát muted trên Inspector)
     syncInspectorPlayer(panel);
 };
 
 exports.close = function() {
     const panel = this;
-    if (panel._currentAudioEl) {
-        try {
-            panel._currentAudioEl.pause();
-            panel._currentAudioEl.currentTime = 0;
-        } catch (e) {}
-        panel._currentAudioEl = null;
-    }
+    safePauseOld(panel);
+    panel._currentAudioEl = null;
 
-    if (panel.onAutoPlayChange && typeof Editor !== 'undefined' && Editor.Message && Editor.Message.removeBroadcastListener) {
-        Editor.Message.removeBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
-        Editor.Message.removeBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
-        Editor.Message.removeBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
+    if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.removeBroadcastListener) {
+        if (panel.onAutoPlayChange) Editor.Message.removeBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
+        if (panel.onStopAudio) Editor.Message.removeBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
+        if (panel.onPlayAsset) Editor.Message.removeBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }
 };

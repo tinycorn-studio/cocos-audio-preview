@@ -136,6 +136,9 @@ function isAudioFile(filePath) {
            lower.endsWith('.m4a') || lower.endsWith('.aac') || lower.endsWith('.flac');
 }
 
+let lastHandledUuid = null;
+let lastHandledTime = 0;
+
 /**
  * Xử lý khi người dùng chọn/click vào một phần tử trong Editor
  */
@@ -152,12 +155,10 @@ async function handleSelection(type, current, all) {
             assetUuid = all[0];
         }
     } else if (type === 'node') {
-        // Khi chọn node trong Scene/Hierarchy thì dừng âm thanh preview
         stopAudioAll();
         return;
     }
 
-    // Nếu type không được truyền, kiểm tra qua Editor.Selection
     if (!assetUuid && typeof Editor !== 'undefined' && Editor.Selection) {
         const selected = Editor.Selection.getSelected('asset');
         if (selected && selected.length > 0) {
@@ -165,22 +166,36 @@ async function handleSelection(type, current, all) {
         }
     }
 
-    if (assetUuid) {
-        try {
-            const assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
-            if (assetInfo && (assetInfo.importer === 'audio-clip' || isAudioFile(assetInfo.file || assetInfo.source))) {
-                const filePath = assetInfo.file || assetInfo.source;
-                console.log(`[Auto Play Audio] 🎵 Auto-playing: ${assetInfo.name || assetUuid}`);
-                playBackground(filePath);
+    if (!assetUuid) {
+        stopAudioAll();
+        return;
+    }
+
+    // Debounce: tránh xử lý trùng khi cả selection:select lẫn selection:activated đều fire
+    const now = Date.now();
+    if (assetUuid === lastHandledUuid && (now - lastHandledTime) < 300) {
+        return;
+    }
+    lastHandledUuid = assetUuid;
+    lastHandledTime = now;
+
+    try {
+        const assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+        if (assetInfo && (assetInfo.importer === 'audio-clip' || isAudioFile(assetInfo.file || assetInfo.source))) {
+            const filePath = assetInfo.file || assetInfo.source;
+            console.log(`[Auto Play Audio] 🎵 Auto-playing: ${assetInfo.name || assetUuid}`);
+            playBackground(filePath);
+            // Broadcast play-asset SAU một khoảng nhỏ để Inspector update() chạy xong trước
+            // (Inspector cần thời gian để render thẻ <audio> mới vào DOM)
+            setTimeout(() => {
                 if (typeof Editor !== 'undefined' && Editor.Message) {
                     Editor.Message.broadcast('auto-play-audio:play-asset', filePath);
                 }
-                return;
-            }
-        } catch (e) {}
-    }
+            }, 80);
+            return;
+        }
+    } catch (e) {}
 
-    // Nếu click vào asset không phải audio (ảnh, script, prefab...) thì dừng phát
     stopAudioAll();
 }
 
