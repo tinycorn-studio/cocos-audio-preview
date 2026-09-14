@@ -52,12 +52,19 @@ function getPlayerWindow() {
             autoplayPolicy: 'no-user-gesture-required'
         }
     });
-    playerWin.loadURL('data:text/html;charset=utf-8,<html><body></body></html>');
+    // Khởi tạo trang HTML với Web Audio API context sẵn sàng
+    const initHtml = `data:text/html;charset=utf-8,<html><body><script>
+        window._ctx = new (window.AudioContext || window.webkitAudioContext)();
+        window._source = null;
+        window._gain = null;
+    </script></body></html>`;
+    playerWin.loadURL(initHtml);
     return playerWin;
 }
 
 /**
- * Phát file âm thanh qua background BrowserWindow
+ * Phát file âm thanh qua background BrowserWindow sử dụng Web Audio API
+ * Dùng AudioContext + GainNode để fade-out mượt mà khi chuyển bài, tránh tiếng rè/click
  * @param {string} filePath Đường dẫn tuyệt đối của file âm thanh
  */
 function playBackground(filePath) {
@@ -74,21 +81,62 @@ function playBackground(filePath) {
         const win = getPlayerWindow();
         const fileUrl = encodeURI('file:///' + filePath.replace(/\\/g, '/')).replace(/#/g, '%23');
         const code = `
-            (function() {
+            (async function() {
                 try {
-                    if (window._audio) {
-                        window._audio.pause();
-                        window._audio.currentTime = 0;
-                        window._audio = null;
+                    // Fade-out bài cũ mượt mà (30ms) trước khi dừng
+                    if (window._gain && window._source) {
+                        try {
+                            var t = window._ctx.currentTime;
+                            window._gain.gain.setValueAtTime(window._gain.gain.value, t);
+                            window._gain.gain.linearRampToValueAtTime(0.0001, t + 0.03);
+                            // Chờ fade-out xong
+                            await new Promise(function(r) { setTimeout(r, 35); });
+                            window._source.stop();
+                        } catch(e) {}
+                        window._source = null;
+                        window._gain = null;
                     }
-                    const a = new Audio(${JSON.stringify(fileUrl)});
-                    window._audio = a;
-                    a.volume = 1.0;
-                    a.play().catch(function(e) {
-                        console.warn('[Auto Play Audio] Lỗi phát audio:', e);
-                    });
+
+                    // Nếu AudioContext bị suspended (do Chromium policy), resume nó
+                    if (window._ctx.state === 'suspended') {
+                        await window._ctx.resume();
+                    }
+
+                    // Fetch file audio và decode thành AudioBuffer
+                    var resp = await fetch(${JSON.stringify(fileUrl)});
+                    var arrayBuf = await resp.arrayBuffer();
+                    var audioBuf = await window._ctx.decodeAudioData(arrayBuf);
+
+                    // Tạo source + gain node mới
+                    var source = window._ctx.createBufferSource();
+                    source.buffer = audioBuf;
+                    var gain = window._ctx.createGain();
+                    gain.gain.value = 1.0;
+                    source.connect(gain);
+                    gain.connect(window._ctx.destination);
+
+                    window._source = source;
+                    window._gain = gain;
+
+                    source.start(0);
+                    source.onended = function() {
+                        window._source = null;
+                        window._gain = null;
+                    };
                 } catch (e) {
-                    console.error('[Auto Play Audio] Lỗi khởi tạo audio:', e);
+                    console.error('[Auto Play Audio] Lỗi phát audio:', e);
+                    // Fallback: thử HTMLAudioElement nếu Web Audio API thất bại
+                    try {
+                        if (window._audioFallback) {
+                            window._audioFallback.volume = 0;
+                            window._audioFallback.pause();
+                            window._audioFallback = null;
+                        }
+                        var a = new Audio(${JSON.stringify(fileUrl)});
+                        window._audioFallback = a;
+                        a.volume = 1.0;
+                        a.play().catch(function(){});
+                    } catch(e2) {}
                 }
             })();
         `;
@@ -99,18 +147,33 @@ function playBackground(filePath) {
 }
 
 /**
- * Dừng phát âm thanh trên background window
+ * Dừng phát âm thanh trên background window (fade-out mượt mà)
  */
 function stopBackground() {
     lastPlayedFile = null;
     if (!playerWin || playerWin.isDestroyed()) return;
     try {
         const code = `
-            if (window._audio) {
-                window._audio.pause();
-                window._audio.currentTime = 0;
-                window._audio = null;
-            }
+            (async function() {
+                // Fade-out Web Audio API
+                if (window._gain && window._source) {
+                    try {
+                        var t = window._ctx.currentTime;
+                        window._gain.gain.setValueAtTime(window._gain.gain.value, t);
+                        window._gain.gain.linearRampToValueAtTime(0.0001, t + 0.03);
+                        await new Promise(function(r) { setTimeout(r, 35); });
+                        window._source.stop();
+                    } catch(e) {}
+                    window._source = null;
+                    window._gain = null;
+                }
+                // Fallback cleanup
+                if (window._audioFallback) {
+                    window._audioFallback.volume = 0;
+                    window._audioFallback.pause();
+                    window._audioFallback = null;
+                }
+            })();
         `;
         playerWin.webContents.executeJavaScript(code).catch(() => {});
     } catch (e) {}
