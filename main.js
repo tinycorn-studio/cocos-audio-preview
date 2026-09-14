@@ -64,7 +64,7 @@ function playBackground(filePath) {
     if (!filePath || !isAutoPlayEnabled) return;
 
     const now = Date.now();
-    if (lastPlayedFile === filePath && (now - lastPlayTime < 200)) {
+    if (lastPlayedFile === filePath && (now - lastPlayTime < 100)) {
         return;
     }
     lastPlayedFile = filePath;
@@ -116,10 +116,16 @@ function stopBackground() {
     } catch (e) {}
 }
 
+let unselectTimer = null;
+
 /**
  * Dừng toàn bộ âm thanh (cả background lẫn Inspector)
  */
 function stopAudioAll() {
+    if (unselectTimer) {
+        clearTimeout(unselectTimer);
+        unselectTimer = null;
+    }
     stopBackground();
     if (typeof Editor !== 'undefined' && Editor.Message) {
         Editor.Message.broadcast('auto-play-audio:stop');
@@ -144,6 +150,12 @@ let lastHandledTime = 0;
  */
 async function handleSelection(type, current, all) {
     if (!isAutoPlayEnabled) return;
+
+    // Hủy bỏ bất kỳ lệnh unselect nào đang chờ
+    if (unselectTimer) {
+        clearTimeout(unselectTimer);
+        unselectTimer = null;
+    }
 
     let assetUuid = null;
     if (type === 'asset') {
@@ -171,7 +183,7 @@ async function handleSelection(type, current, all) {
         return;
     }
 
-    // Debounce: tránh xử lý trùng khi cả selection:select lẫn selection:activated đều fire
+    // Debounce: tránh xử lý trùng khi cả selection:select lẫn selection:activated đều fire cho CÙNG 1 asset
     const now = Date.now();
     if (assetUuid === lastHandledUuid && (now - lastHandledTime) < 300) {
         return;
@@ -191,7 +203,7 @@ async function handleSelection(type, current, all) {
                 if (typeof Editor !== 'undefined' && Editor.Message) {
                     Editor.Message.broadcast('auto-play-audio:play-asset', filePath);
                 }
-            }, 80);
+            }, 60);
             return;
         }
     } catch (e) {}
@@ -228,7 +240,21 @@ module.exports = {
 
         onSelectionUnselect(type) {
             if (type === 'asset') {
-                stopAudioAll();
+                if (unselectTimer) {
+                    clearTimeout(unselectTimer);
+                }
+                // Debounce 150ms: khi click chuyển từ asset A sang asset B,
+                // Editor sẽ unselect A rồi select B. Chúng ta chỉ dừng audio khi
+                // THỰC SỰ không còn asset nào được chọn (người dùng click ra ngoài).
+                unselectTimer = setTimeout(() => {
+                    unselectTimer = null;
+                    if (typeof Editor !== 'undefined' && Editor.Selection) {
+                        const selected = Editor.Selection.getSelected('asset');
+                        if (!selected || selected.length === 0) {
+                            stopAudioAll();
+                        }
+                    }
+                }, 150);
             }
         },
 

@@ -109,9 +109,9 @@ function syncInspectorPlayer(panel) {
                 audioEl._autoPlayCleanup();
             }
 
-            // Chỉ lắng nghe sự kiện do NGƯỜI DÙNG tương tác trực tiếp trên native controls
+            // Chỉ lắng nghe sự kiện khi NGƯỜI DÙNG bấm Play trực tiếp trên native controls (unmuted)
             const onUserPlay = () => {
-                // Người dùng bấm Play trên native controls (unmuted) → dừng background player
+                // Người dùng bấm Play trên native controls (unmuted) → dừng background player để tránh trùng tiếng
                 if (!audioEl.muted) {
                     try {
                         Editor.Message.request('auto-play-audio', 'stop-background-audio');
@@ -119,34 +119,13 @@ function syncInspectorPlayer(panel) {
                 }
             };
 
-            const onUserPause = () => {
-                // CHỈ dừng background nếu đây là pause do người dùng (không phải do code)
-                // Kiểm tra: nếu audio KHÔNG ở cuối (ended) và KHÔNG bị muted thì là user pause
-                if (!audioEl.muted && !audioEl.ended) {
-                    try {
-                        Editor.Message.request('auto-play-audio', 'stop-background-audio');
-                    } catch (e) {}
-                }
-            };
-
-            const onEnded = () => {
-                // Bài nhạc kết thúc tự nhiên → dừng background player
-                try {
-                    Editor.Message.request('auto-play-audio', 'stop-background-audio');
-                } catch (e) {}
-            };
-
             audioEl.addEventListener('play', onUserPlay);
-            audioEl.addEventListener('pause', onUserPause);
-            audioEl.addEventListener('ended', onEnded);
 
             audioEl._autoPlayCleanup = () => {
                 audioEl.removeEventListener('play', onUserPlay);
-                audioEl.removeEventListener('pause', onUserPause);
-                audioEl.removeEventListener('ended', onEnded);
             };
 
-            // Phát muted để thanh tiến trình chạy theo
+            // Bật muted = true trước khi gọi play để thanh tiến trình chạy theo
             // (Chromium cho phép muted play 100% mà không cần user gesture)
             audioEl.muted = true;
             audioEl.currentTime = 0;
