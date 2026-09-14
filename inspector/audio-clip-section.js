@@ -141,6 +141,7 @@ function syncInspectorPlayer(panel) {
             };
 
             audioEl.loop = !!panel._isLoopEnabled;
+            audioEl.playbackRate = panel._currentPitch || 1.0;
             audioEl.muted = false;
 
             // Kết nối Web Audio Analyser để vẽ waveform
@@ -207,6 +208,18 @@ exports.template = /* html */`
             </ui-button>
         </div>
     </ui-prop>
+
+    <ui-prop class="pitch-prop">
+        <ui-label slot="label" value="Pitch / Speed" tooltip="Tốc độ và độ cao âm thanh (0.5x - 2.0x)"></ui-label>
+        <div slot="content" class="pitch-content">
+            <ui-slider class="pitch-slider" min="0.5" max="2.0" step="0.05" value="1.0"></ui-slider>
+            <span class="pitch-val">1.00x</span>
+            <ui-button class="pitch-reset-btn tiny transparent" tooltip="Đặt lại về mặc định 1.0x">
+                <ui-icon value="reset"></ui-icon>
+            </ui-button>
+        </div>
+    </ui-prop>
+
     <canvas id="waveform-canvas" width="300" height="40"></canvas>
 </div>
 `;
@@ -237,6 +250,25 @@ exports.style = /* css */`
 .audio-clip-autoplay-wrapper ui-button {
     cursor: pointer;
 }
+.audio-clip-autoplay-wrapper .pitch-prop {
+    margin-top: 2px;
+}
+.audio-clip-autoplay-wrapper .pitch-content {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+}
+.audio-clip-autoplay-wrapper .pitch-slider {
+    flex: 1;
+}
+.audio-clip-autoplay-wrapper .pitch-val {
+    font-size: 11px;
+    font-family: monospace;
+    color: var(--color-normal-fill-font, #ccc);
+    min-width: 36px;
+    text-align: right;
+}
 #waveform-canvas {
     width: 100%;
     height: 40px;
@@ -254,6 +286,9 @@ exports.$ = {
     loopCheckbox: '.loop-checkbox',
     replayBtn: '.replay-btn',
     stopBtn: '.stop-btn',
+    pitchSlider: '.pitch-slider',
+    pitchVal: '.pitch-val',
+    pitchResetBtn: '.pitch-reset-btn',
     canvas: '#waveform-canvas'
 };
 
@@ -261,6 +296,7 @@ exports.ready = function() {
     const panel = this;
     panel._isAutoPlayEnabled = true;
     panel._isLoopEnabled = false;
+    panel._currentPitch = 1.0;
     panel._currentAudioEl = null;
     panel._drawReq = null;
     panel._isDrawing = false;
@@ -336,12 +372,20 @@ exports.ready = function() {
         if (panel._currentAudioEl) panel._currentAudioEl.loop = panel._isLoopEnabled;
     };
 
+    panel.onPitchChange = (val) => {
+        panel._currentPitch = Number(val) || 1.0;
+        if (panel.$.pitchVal) panel.$.pitchVal.textContent = panel._currentPitch.toFixed(2) + 'x';
+        if (panel.$.pitchSlider) panel.$.pitchSlider.value = panel._currentPitch;
+        if (panel._currentAudioEl) panel._currentAudioEl.playbackRate = panel._currentPitch;
+    };
+
     panel.onStopAudio = () => safePauseOld(panel);
     panel.onPlayAsset = () => syncInspectorPlayer(panel);
 
     if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.addBroadcastListener) {
         Editor.Message.addBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
         Editor.Message.addBroadcastListener('auto-play-audio:loop-changed', panel.onLoopChange);
+        Editor.Message.addBroadcastListener('auto-play-audio:pitch-changed', panel.onPitchChange);
         Editor.Message.addBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
         Editor.Message.addBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }
@@ -366,6 +410,25 @@ exports.ready = function() {
     };
     panel.$.loopCheckbox.addEventListener('change', onLoopToggle);
     panel.$.loopCheckbox.addEventListener('confirm', onLoopToggle);
+
+    const onPitchUpdate = async (val) => {
+        val = Math.max(0.5, Math.min(2.0, Math.round(Number(val) * 100) / 100));
+        panel._currentPitch = val;
+        if (panel.$.pitchVal) panel.$.pitchVal.textContent = val.toFixed(2) + 'x';
+        if (panel.$.pitchSlider) panel.$.pitchSlider.value = val;
+        if (panel._currentAudioEl) panel._currentAudioEl.playbackRate = val;
+        try {
+            await Editor.Message.request('auto-play-audio', 'set-pitch', val);
+        } catch (e) {}
+    };
+
+    if (panel.$.pitchSlider) {
+        panel.$.pitchSlider.addEventListener('change', (e) => onPitchUpdate(e.target.value));
+        panel.$.pitchSlider.addEventListener('confirm', (e) => onPitchUpdate(e.target.value));
+    }
+    if (panel.$.pitchResetBtn) {
+        panel.$.pitchResetBtn.addEventListener('click', () => onPitchUpdate(1.0));
+    }
 
     panel.$.replayBtn.addEventListener('click', async () => {
         if (panel.currentAsset && panel.currentAsset.file) {
@@ -397,6 +460,13 @@ exports.update = async function(assetList, metaList) {
         const loopEnabled = await Editor.Message.request('auto-play-audio', 'get-loop');
         if (typeof loopEnabled === 'boolean') panel._isLoopEnabled = loopEnabled;
         if (panel.$.loopCheckbox) panel.$.loopCheckbox.value = panel._isLoopEnabled;
+
+        const pitchVal = await Editor.Message.request('auto-play-audio', 'get-pitch');
+        if (typeof pitchVal === 'number' && !isNaN(pitchVal)) {
+            panel._currentPitch = pitchVal;
+            if (panel.$.pitchVal) panel.$.pitchVal.textContent = panel._currentPitch.toFixed(2) + 'x';
+            if (panel.$.pitchSlider) panel.$.pitchSlider.value = panel._currentPitch;
+        }
     } catch (e) {}
 
     safePauseOld(panel);
@@ -428,6 +498,7 @@ exports.close = function() {
     if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.removeBroadcastListener) {
         if (panel.onAutoPlayChange) Editor.Message.removeBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
         if (panel.onLoopChange) Editor.Message.removeBroadcastListener('auto-play-audio:loop-changed', panel.onLoopChange);
+        if (panel.onPitchChange) Editor.Message.removeBroadcastListener('auto-play-audio:pitch-changed', panel.onPitchChange);
         if (panel.onStopAudio) Editor.Message.removeBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
         if (panel.onPlayAsset) Editor.Message.removeBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }

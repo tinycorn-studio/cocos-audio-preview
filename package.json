@@ -1,6 +1,6 @@
 {
   "package_version": 2,
-  "version": "1.4.1",
+  "version": "1.5.0",
   "name": "auto-play-audio",
   "description": "Tự động phát âm thanh khi click vào asset audio như trong Unity, có tùy chọn bật/tắt trên Inspector",
   "author": "Tinycorn Studio",
@@ -56,6 +56,12 @@
       },
       "set-loop": {
         "methods": ["setLoop"]
+      },
+      "get-pitch": {
+        "methods": ["getPitch"]
+      },
+      "set-pitch": {
+        "methods": ["setPitch"]
       },
       "stop-audio": {
         "methods": ["stopAudio"]

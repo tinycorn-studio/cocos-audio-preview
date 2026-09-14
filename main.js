@@ -4,6 +4,7 @@ const { BrowserWindow } = require('electron');
 
 let isAutoPlayEnabled = true;
 let isLoopEnabled = false;
+let currentPitch = 1.0;
 let playerWin = null;
 let lastPlayedFile = null;
 let lastPlayTime = 0;
@@ -22,6 +23,10 @@ async function loadProfile() {
             if (typeof loopVal === 'boolean') {
                 isLoopEnabled = loopVal;
             }
+            const pitchVal = await Editor.Profile.getConfig('auto-play-audio', 'pitch');
+            if (typeof pitchVal === 'number' && !isNaN(pitchVal) && pitchVal >= 0.25 && pitchVal <= 4.0) {
+                currentPitch = pitchVal;
+            }
         }
     } catch (e) {}
 }
@@ -34,6 +39,7 @@ async function saveProfile() {
         if (typeof Editor !== 'undefined' && Editor.Profile) {
             await Editor.Profile.setConfig('auto-play-audio', 'autoPlay', isAutoPlayEnabled);
             await Editor.Profile.setConfig('auto-play-audio', 'loop', isLoopEnabled);
+            await Editor.Profile.setConfig('auto-play-audio', 'pitch', currentPitch);
         }
     } catch (e) {}
 }
@@ -150,6 +156,7 @@ function playBackground(filePath) {
                     var source = window._ctx.createBufferSource();
                     source.buffer = audioBuf;
                     source.loop = ${isLoopEnabled};
+                    source.playbackRate.value = ${currentPitch};
 
                     var gain = window._ctx.createGain();
                     gain.gain.value = 1.0;
@@ -181,6 +188,7 @@ function playBackground(filePath) {
                         var a = new Audio(${JSON.stringify(fileUrl)});
                         window._audioFallback = a;
                         a.loop = ${isLoopEnabled};
+                        a.playbackRate = ${currentPitch};
                         a.volume = 1.0;
                         a.play().catch(function(){});
                     } catch(e2) {}
@@ -422,6 +430,36 @@ module.exports = {
             }
             console.log(`[Auto Play Audio] Loop: ${isLoopEnabled ? 'BẬT' : 'TẮT'}`);
             return isLoopEnabled;
+        },
+
+        getPitch() {
+            return currentPitch;
+        },
+
+        async setPitch(val) {
+            currentPitch = Math.max(0.25, Math.min(4.0, Number(val) || 1.0));
+            currentPitch = Math.round(currentPitch * 100) / 100;
+            await saveProfile();
+            if (playerWin && !playerWin.isDestroyed()) {
+                const code = `
+                    if (window._source && window._source.playbackRate && window._ctx) {
+                        try {
+                            window._source.playbackRate.setValueAtTime(${currentPitch}, window._ctx.currentTime);
+                        } catch(e) {
+                            window._source.playbackRate.value = ${currentPitch};
+                        }
+                    }
+                    if (window._audioFallback) {
+                        window._audioFallback.playbackRate = ${currentPitch};
+                    }
+                `;
+                playerWin.webContents.executeJavaScript(code).catch(() => {});
+            }
+            if (typeof Editor !== 'undefined' && Editor.Message) {
+                Editor.Message.broadcast('auto-play-audio:pitch-changed', currentPitch);
+            }
+            console.log(`[Auto Play Audio] Pitch / Speed: ${currentPitch}x`);
+            return currentPitch;
         },
 
         async toggleAutoPlay() {
