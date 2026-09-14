@@ -51,6 +51,12 @@
       "toggle-auto-play": {
         "methods": ["toggleAutoPlay"]
       },
+      "get-loop": {
+        "methods": ["getLoop"]
+      },
+      "set-loop": {
+        "methods": ["setLoop"]
+      },
       "stop-audio": {
         "methods": ["stopAudio"]
       },

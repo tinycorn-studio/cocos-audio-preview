@@ -3,6 +3,7 @@
 const { BrowserWindow } = require('electron');
 
 let isAutoPlayEnabled = true;
+let isLoopEnabled = false;
 let playerWin = null;
 let lastPlayedFile = null;
 let lastPlayTime = 0;
@@ -17,6 +18,10 @@ async function loadProfile() {
             if (typeof val === 'boolean') {
                 isAutoPlayEnabled = val;
             }
+            const loopVal = await Editor.Profile.getConfig('auto-play-audio', 'loop');
+            if (typeof loopVal === 'boolean') {
+                isLoopEnabled = loopVal;
+            }
         }
     } catch (e) {}
 }
@@ -28,6 +33,7 @@ async function saveProfile() {
     try {
         if (typeof Editor !== 'undefined' && Editor.Profile) {
             await Editor.Profile.setConfig('auto-play-audio', 'autoPlay', isAutoPlayEnabled);
+            await Editor.Profile.setConfig('auto-play-audio', 'loop', isLoopEnabled);
         }
     } catch (e) {}
 }
@@ -110,6 +116,7 @@ function playBackground(filePath) {
                     // Tạo source + gain node mới
                     var source = window._ctx.createBufferSource();
                     source.buffer = audioBuf;
+                    source.loop = ${isLoopEnabled};
                     var gain = window._ctx.createGain();
                     gain.gain.value = 1.0;
                     source.connect(gain);
@@ -134,6 +141,7 @@ function playBackground(filePath) {
                         }
                         var a = new Audio(${JSON.stringify(fileUrl)});
                         window._audioFallback = a;
+                        a.loop = ${isLoopEnabled};
                         a.volume = 1.0;
                         a.play().catch(function(){});
                     } catch(e2) {}
@@ -348,6 +356,27 @@ module.exports = {
             }
             console.log(`[Auto Play Audio] Auto-Play: ${isAutoPlayEnabled ? 'BẬT' : 'TẮT'}`);
             return isAutoPlayEnabled;
+        },
+
+        getLoop() {
+            return isLoopEnabled;
+        },
+
+        async setLoop(val) {
+            isLoopEnabled = !!val;
+            await saveProfile();
+            if (playerWin && !playerWin.isDestroyed()) {
+                const code = `
+                    if (window._source) window._source.loop = ${isLoopEnabled};
+                    if (window._audioFallback) window._audioFallback.loop = ${isLoopEnabled};
+                `;
+                playerWin.webContents.executeJavaScript(code).catch(() => {});
+            }
+            if (typeof Editor !== 'undefined' && Editor.Message) {
+                Editor.Message.broadcast('auto-play-audio:loop-changed', isLoopEnabled);
+            }
+            console.log(`[Auto Play Audio] Loop: ${isLoopEnabled ? 'BẬT' : 'TẮT'}`);
+            return isLoopEnabled;
         },
 
         async toggleAutoPlay() {
