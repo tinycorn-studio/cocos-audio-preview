@@ -38,6 +38,8 @@ async function saveProfile() {
     } catch (e) {}
 }
 
+let playSessionSeq = 0;
+
 /**
  * Khởi tạo hoặc lấy BrowserWindow ẩn dùng để phát audio
  * BrowserWindow này có autoplayPolicy: 'no-user-gesture-required' để không bị trình duyệt chặn
@@ -58,11 +60,26 @@ function getPlayerWindow() {
             autoplayPolicy: 'no-user-gesture-required'
         }
     });
-    // Khởi tạo trang HTML với Web Audio API context sẵn sàng
+
+    // Bắt sự kiện crash để tự động tái tạo window
+    playerWin.webContents.on('render-process-gone', (event, details) => {
+        console.warn('[Auto Play Audio] Background player crashed, tái khởi tạo...', details.reason);
+        try {
+            if (playerWin && !playerWin.isDestroyed()) playerWin.destroy();
+        } catch (e) {}
+        playerWin = null;
+    });
+
+    playerWin.on('closed', () => {
+        playerWin = null;
+    });
+
+    // Khởi tạo trang HTML với Web Audio API context và bộ điều khiển player chuyên dụng
     const initHtml = `data:text/html;charset=utf-8,<html><body><script>
         window._ctx = new (window.AudioContext || window.webkitAudioContext)();
         window._source = null;
         window._gain = null;
+        window._currentSession = 0;
     </script></body></html>`;
     playerWin.loadURL(initHtml);
     return playerWin;
@@ -70,7 +87,7 @@ function getPlayerWindow() {
 
 /**
  * Phát file âm thanh qua background BrowserWindow sử dụng Web Audio API
- * Dùng AudioContext + GainNode để fade-out mượt mà khi chuyển bài, tránh tiếng rè/click
+ * Có cơ chế Session Token để chống Race Condition khi tap nhanh và giải phóng AudioBuffer
  * @param {string} filePath Đường dẫn tuyệt đối của file âm thanh
  */
 function playBackground(filePath) {
@@ -82,41 +99,58 @@ function playBackground(filePath) {
     }
     lastPlayedFile = filePath;
     lastPlayTime = now;
+    const sessionToken = ++playSessionSeq;
 
     try {
         const win = getPlayerWindow();
         const fileUrl = encodeURI('file:///' + filePath.replace(/\\/g, '/')).replace(/#/g, '%23');
         const code = `
             (async function() {
+                var mySession = ${sessionToken};
+                window._currentSession = mySession;
+
                 try {
-                    // Fade-out bài cũ mượt mà (30ms) trước khi dừng
+                    // 1. Dừng và ngắt kết nối bài cũ mượt mà (30ms fade-out)
                     if (window._gain && window._source) {
                         try {
                             var t = window._ctx.currentTime;
                             window._gain.gain.setValueAtTime(window._gain.gain.value, t);
                             window._gain.gain.linearRampToValueAtTime(0.0001, t + 0.03);
-                            // Chờ fade-out xong
                             await new Promise(function(r) { setTimeout(r, 35); });
                             window._source.stop();
+                            window._source.disconnect();
                         } catch(e) {}
                         window._source = null;
                         window._gain = null;
                     }
 
-                    // Nếu AudioContext bị suspended (do Chromium policy), resume nó
+                    // Nếu trong lúc fade-out đã có bài mới được chọn, hủy ngay bài này
+                    if (window._currentSession !== mySession) return;
+
+                    // 2. Resume AudioContext nếu bị suspended
                     if (window._ctx.state === 'suspended') {
                         await window._ctx.resume();
                     }
 
-                    // Fetch file audio và decode thành AudioBuffer
+                    // 3. Fetch và Decode audio
                     var resp = await fetch(${JSON.stringify(fileUrl)});
                     var arrayBuf = await resp.arrayBuffer();
+
+                    // Kiểm tra lại session trước khi tốn tài nguyên decode
+                    if (window._currentSession !== mySession) return;
+
                     var audioBuf = await window._ctx.decodeAudioData(arrayBuf);
 
-                    // Tạo source + gain node mới
+                    // Kiểm tra lại session sau khi decode xong (chống file nhẹ vượt mặt file nặng)
+                    if (window._currentSession !== mySession) {
+                        return;
+                    }
+
+                    // 4. Tạo source + gain node mới
                     var source = window._ctx.createBufferSource();
                     source.buffer = audioBuf;
                     source.loop = ${isLoopEnabled};
+
                     var gain = window._ctx.createGain();
                     gain.gain.value = 1.0;
                     source.connect(gain);
@@ -127,16 +161,21 @@ function playBackground(filePath) {
 
                     source.start(0);
                     source.onended = function() {
-                        window._source = null;
-                        window._gain = null;
+                        if (window._source === source) {
+                            try { source.disconnect(); } catch(e) {}
+                            window._source = null;
+                            window._gain = null;
+                        }
                     };
                 } catch (e) {
+                    if (window._currentSession !== mySession) return;
                     console.error('[Auto Play Audio] Lỗi phát audio:', e);
                     // Fallback: thử HTMLAudioElement nếu Web Audio API thất bại
                     try {
                         if (window._audioFallback) {
                             window._audioFallback.volume = 0;
                             window._audioFallback.pause();
+                            window._audioFallback.src = '';
                             window._audioFallback = null;
                         }
                         var a = new Audio(${JSON.stringify(fileUrl)});
@@ -215,6 +254,7 @@ function isAudioFile(filePath) {
 
 let lastHandledUuid = null;
 let lastHandledTime = 0;
+let selectionSeq = 0;
 
 /**
  * Xử lý khi người dùng chọn/click vào một phần tử trong Editor
@@ -261,17 +301,20 @@ async function handleSelection(type, current, all) {
     }
     lastHandledUuid = assetUuid;
     lastHandledTime = now;
+    const currentToken = ++selectionSeq;
 
     try {
         const assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', assetUuid);
+        // Kiểm tra xem trong lúc query IPC có selection mới xuất hiện không
+        if (currentToken !== selectionSeq) return;
+
         if (assetInfo && (assetInfo.importer === 'audio-clip' || isAudioFile(assetInfo.file || assetInfo.source))) {
             const filePath = assetInfo.file || assetInfo.source;
             console.log(`[Auto Play Audio] 🎵 Auto-playing: ${assetInfo.name || assetUuid}`);
             playBackground(filePath);
             // Broadcast play-asset SAU một khoảng nhỏ để Inspector update() chạy xong trước
-            // (Inspector cần thời gian để render thẻ <audio> mới vào DOM)
             setTimeout(() => {
-                if (typeof Editor !== 'undefined' && Editor.Message) {
+                if (currentToken === selectionSeq && typeof Editor !== 'undefined' && Editor.Message) {
                     Editor.Message.broadcast('auto-play-audio:play-asset', filePath);
                 }
             }, 60);
@@ -279,7 +322,9 @@ async function handleSelection(type, current, all) {
         }
     } catch (e) {}
 
-    stopAudioAll();
+    if (currentToken === selectionSeq) {
+        stopAudioAll();
+    }
 }
 
 module.exports = {

@@ -68,6 +68,13 @@ function getAudioElement(panel) {
  * Dừng phần tử audio cũ một cách an toàn (không trigger onPause → stop-background)
  */
 function safePauseOld(panel) {
+    if (panel._syncTimer) {
+        clearTimeout(panel._syncTimer);
+        panel._syncTimer = null;
+    }
+    if (panel._stopDrawing) {
+        panel._stopDrawing();
+    }
     if (panel._currentAudioEl) {
         // Xóa event listeners TRƯỚC KHI pause để tránh onPause gọi stop-background-audio
         if (panel._currentAudioEl._autoPlayCleanup) {
@@ -86,6 +93,11 @@ function safePauseOld(panel) {
  */
 function syncInspectorPlayer(panel) {
     if (!panel._isAutoPlayEnabled) return;
+
+    if (panel._syncTimer) {
+        clearTimeout(panel._syncTimer);
+        panel._syncTimer = null;
+    }
 
     let attempts = 0;
     const maxAttempts = 15;
@@ -111,27 +123,38 @@ function syncInspectorPlayer(panel) {
                         Editor.Message.request('auto-play-audio', 'stop-background-audio');
                     } catch (e) {}
                 }
+                if (panel._startDrawing) panel._startDrawing();
+            };
+
+            const onPauseOrEnd = () => {
+                if (panel._stopDrawing) panel._stopDrawing();
             };
 
             audioEl.addEventListener('play', onUserPlay);
+            audioEl.addEventListener('pause', onPauseOrEnd);
+            audioEl.addEventListener('ended', onPauseOrEnd);
+
             audioEl._autoPlayCleanup = () => {
                 audioEl.removeEventListener('play', onUserPlay);
+                audioEl.removeEventListener('pause', onPauseOrEnd);
+                audioEl.removeEventListener('ended', onPauseOrEnd);
             };
 
             audioEl.loop = !!panel._isLoopEnabled;
             audioEl.muted = false;
 
+            // Kết nối Web Audio Analyser để vẽ waveform
             if (!audioEl._isAnalyzed) {
                 audioEl._isAnalyzed = true;
                 try {
-                    if (!panel._audioCtx) {
+                    if (!panel._audioCtx || panel._audioCtx.state === 'closed') {
                         panel._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                     }
                     const source = panel._audioCtx.createMediaElementSource(audioEl);
                     const analyser = panel._audioCtx.createAnalyser();
                     analyser.fftSize = 128;
                     const gain = panel._audioCtx.createGain();
-                    gain.gain.value = 0; // Mute in inspector!
+                    gain.gain.value = 0; // Mute trên inspector để tránh trùng tiếng
                     
                     source.connect(analyser);
                     analyser.connect(gain);
@@ -141,22 +164,27 @@ function syncInspectorPlayer(panel) {
                     audioEl._waveformMuted = true;
                 } catch (e) {
                     console.warn('[Auto Play Audio] Waveform init error:', e);
-                    audioEl.muted = true; // fallback
+                    audioEl.muted = true; // fallback an toàn
                 }
             }
 
-            audioEl.currentTime = 0;
-            audioEl.play().catch(() => {});
+            try {
+                audioEl.currentTime = 0;
+            } catch (e) {}
+
+            audioEl.play().then(() => {
+                if (panel._startDrawing) panel._startDrawing();
+            }).catch(() => {});
             return;
         }
 
         attempts++;
         if (attempts < maxAttempts) {
-            setTimeout(trySync, 40);
+            panel._syncTimer = setTimeout(trySync, 40);
         }
     };
 
-    setTimeout(trySync, 50);
+    panel._syncTimer = setTimeout(trySync, 50);
 }
 
 exports.template = /* html */`
@@ -235,22 +263,32 @@ exports.ready = function() {
     panel._isLoopEnabled = false;
     panel._currentAudioEl = null;
     panel._drawReq = null;
+    panel._isDrawing = false;
+    panel._syncTimer = null;
 
     const ctx2d = panel.$.canvas.getContext('2d');
-    
+    const bufferLength = 64; // 128 fftSize -> 64 frequency bins
+    const dataArray = new Uint8Array(bufferLength); // Tái sử dụng mảng cố định, chống GC pressure
+
+    const renderFlatLine = () => {
+        ctx2d.clearRect(0, 0, panel.$.canvas.width, panel.$.canvas.height);
+        ctx2d.fillStyle = '#333';
+        ctx2d.fillRect(0, panel.$.canvas.height / 2, panel.$.canvas.width, 1);
+    };
+
+    // Vẽ thanh ban đầu
+    renderFlatLine();
+
     const drawWaveform = () => {
+        if (!panel._isDrawing) return;
         panel._drawReq = requestAnimationFrame(drawWaveform);
         
-        if (!panel._currentAudioEl || !panel._currentAudioEl._analyser) {
-            ctx2d.clearRect(0, 0, panel.$.canvas.width, panel.$.canvas.height);
-            ctx2d.fillStyle = '#333';
-            ctx2d.fillRect(0, panel.$.canvas.height / 2, panel.$.canvas.width, 1);
+        const analyser = panel._currentAudioEl && panel._currentAudioEl._analyser;
+        if (!analyser || (panel._currentAudioEl && panel._currentAudioEl.paused)) {
+            panel._stopDrawing();
             return;
         }
 
-        const analyser = panel._currentAudioEl._analyser;
-        const bufferLength = analyser.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
         analyser.getByteFrequencyData(dataArray);
 
         ctx2d.clearRect(0, 0, panel.$.canvas.width, panel.$.canvas.height);
@@ -269,7 +307,22 @@ exports.ready = function() {
             x += barWidth + 1;
         }
     };
-    drawWaveform();
+
+    panel._startDrawing = () => {
+        if (!panel._isDrawing) {
+            panel._isDrawing = true;
+            drawWaveform();
+        }
+    };
+
+    panel._stopDrawing = () => {
+        panel._isDrawing = false;
+        if (panel._drawReq) {
+            cancelAnimationFrame(panel._drawReq);
+            panel._drawReq = null;
+        }
+        renderFlatLine();
+    };
 
     panel.onAutoPlayChange = (enabled) => {
         panel._isAutoPlayEnabled = !!enabled;
@@ -330,7 +383,11 @@ exports.ready = function() {
 
 exports.update = async function(assetList, metaList) {
     const panel = this;
-    if (assetList && assetList.length > 0) panel.currentAsset = assetList[0];
+    if (assetList && assetList.length > 0) {
+        panel.currentAsset = assetList[0];
+    } else {
+        panel.currentAsset = null;
+    }
 
     try {
         const enabled = await Editor.Message.request('auto-play-audio', 'get-auto-play');
@@ -348,12 +405,24 @@ exports.update = async function(assetList, metaList) {
 
 exports.close = function() {
     const panel = this;
+    if (panel._syncTimer) {
+        clearTimeout(panel._syncTimer);
+        panel._syncTimer = null;
+    }
     safePauseOld(panel);
     panel._currentAudioEl = null;
+    panel.currentAsset = null;
 
-    if (panel._drawReq) {
-        cancelAnimationFrame(panel._drawReq);
-        panel._drawReq = null;
+    if (panel._stopDrawing) {
+        panel._stopDrawing();
+    }
+
+    // Đóng AudioContext khi unmount để tránh rò rỉ AudioContext trong Chromium renderer
+    if (panel._audioCtx && panel._audioCtx.state !== 'closed') {
+        try {
+            panel._audioCtx.close();
+        } catch (e) {}
+        panel._audioCtx = null;
     }
 
     if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.removeBroadcastListener) {
