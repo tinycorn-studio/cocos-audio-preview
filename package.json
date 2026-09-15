@@ -29,6 +29,15 @@
       "editor": {
         "autoPlay": {
           "default": true
+        },
+        "loop": {
+          "default": false
+        },
+        "pitch": {
+          "default": 1.0
+        },
+        "volume": {
+          "default": 1.0
         }
       }
     },
@@ -62,6 +71,12 @@
       },
       "set-pitch": {
         "methods": ["setPitch"]
+      },
+      "get-volume": {
+        "methods": ["getVolume"]
+      },
+      "set-volume": {
+        "methods": ["setVolume"]
       },
       "stop-audio": {
         "methods": ["stopAudio"]

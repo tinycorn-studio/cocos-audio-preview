@@ -151,22 +151,28 @@ function syncInspectorPlayer(panel) {
                     if (!panel._audioCtx || panel._audioCtx.state === 'closed') {
                         panel._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                     }
+                    // Resume context nếu bị suspended (autoplay policy) để analyser có dữ liệu
+                    if (panel._audioCtx.state === 'suspended') {
+                        panel._audioCtx.resume().catch(() => {});
+                    }
                     const source = panel._audioCtx.createMediaElementSource(audioEl);
                     const analyser = panel._audioCtx.createAnalyser();
                     analyser.fftSize = 128;
                     const gain = panel._audioCtx.createGain();
                     gain.gain.value = 0; // Mute trên inspector để tránh trùng tiếng
-                    
+
                     source.connect(analyser);
                     analyser.connect(gain);
                     gain.connect(panel._audioCtx.destination);
-                    
+
                     audioEl._analyser = analyser;
                     audioEl._waveformMuted = true;
                 } catch (e) {
                     console.warn('[Auto Play Audio] Waveform init error:', e);
                     audioEl.muted = true; // fallback an toàn
                 }
+            } else if (panel._audioCtx && panel._audioCtx.state === 'suspended') {
+                panel._audioCtx.resume().catch(() => {});
             }
 
             try {
@@ -220,6 +226,14 @@ exports.template = /* html */`
         </div>
     </ui-prop>
 
+    <ui-prop class="volume-prop">
+        <ui-label slot="label" value="Volume" tooltip="Âm lượng preview (0% - 100%)"></ui-label>
+        <div slot="content" class="volume-content">
+            <ui-slider class="volume-slider" min="0" max="1" step="0.05" value="1.0"></ui-slider>
+            <span class="volume-val">100%</span>
+        </div>
+    </ui-prop>
+
     <canvas id="waveform-canvas" width="300" height="40"></canvas>
 </div>
 `;
@@ -259,6 +273,22 @@ exports.style = /* css */`
     gap: 6px;
     width: 100%;
 }
+.audio-clip-autoplay-wrapper .volume-content {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+}
+.audio-clip-autoplay-wrapper .volume-slider {
+    flex: 1;
+}
+.audio-clip-autoplay-wrapper .volume-val {
+    font-size: 11px;
+    font-family: monospace;
+    color: var(--color-normal-fill-font, #ccc);
+    min-width: 36px;
+    text-align: right;
+}
 .audio-clip-autoplay-wrapper .pitch-slider {
     flex: 1;
 }
@@ -289,6 +319,8 @@ exports.$ = {
     pitchSlider: '.pitch-slider',
     pitchVal: '.pitch-val',
     pitchResetBtn: '.pitch-reset-btn',
+    volumeSlider: '.volume-slider',
+    volumeVal: '.volume-val',
     canvas: '#waveform-canvas'
 };
 
@@ -297,7 +329,9 @@ exports.ready = function() {
     panel._isAutoPlayEnabled = true;
     panel._isLoopEnabled = false;
     panel._currentPitch = 1.0;
+    panel._currentVolume = 1.0;
     panel._currentAudioEl = null;
+    panel._lastAssetUuid = null;
     panel._drawReq = null;
     panel._isDrawing = false;
     panel._syncTimer = null;
@@ -328,8 +362,10 @@ exports.ready = function() {
         analyser.getByteFrequencyData(dataArray);
 
         ctx2d.clearRect(0, 0, panel.$.canvas.width, panel.$.canvas.height);
-        
-        const barWidth = (panel.$.canvas.width / bufferLength) * 2.5;
+
+        // Fix overflow: chia đều canvas cho 64 bins (trước đây *2.5 gây tràn ~812px trên canvas 300px)
+        const slotW = panel.$.canvas.width / bufferLength;
+        const barWidth = Math.max(1, slotW - 1);
         let x = 0;
 
         for (let i = 0; i < bufferLength; i++) {
@@ -337,10 +373,10 @@ exports.ready = function() {
             const r = barHeight + (25 * (i/bufferLength));
             const g = 150 + (100 * (i/bufferLength));
             const b = 255;
-            
+
             ctx2d.fillStyle = `rgb(${r},${g},${b})`;
             ctx2d.fillRect(x, panel.$.canvas.height - barHeight, barWidth, barHeight);
-            x += barWidth + 1;
+            x += slotW;
         }
     };
 
@@ -379,6 +415,13 @@ exports.ready = function() {
         if (panel._currentAudioEl) panel._currentAudioEl.playbackRate = panel._currentPitch;
     };
 
+    panel.onVolumeChange = (val) => {
+        panel._currentVolume = Math.max(0, Math.min(1, Number(val)));
+        if (isNaN(panel._currentVolume)) panel._currentVolume = 1.0;
+        if (panel.$.volumeVal) panel.$.volumeVal.textContent = Math.round(panel._currentVolume * 100) + '%';
+        if (panel.$.volumeSlider) panel.$.volumeSlider.value = panel._currentVolume;
+    };
+
     panel.onStopAudio = () => safePauseOld(panel);
     panel.onPlayAsset = () => syncInspectorPlayer(panel);
 
@@ -386,12 +429,17 @@ exports.ready = function() {
         Editor.Message.addBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
         Editor.Message.addBroadcastListener('auto-play-audio:loop-changed', panel.onLoopChange);
         Editor.Message.addBroadcastListener('auto-play-audio:pitch-changed', panel.onPitchChange);
+        Editor.Message.addBroadcastListener('auto-play-audio:volume-changed', panel.onVolumeChange);
         Editor.Message.addBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
         Editor.Message.addBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }
 
+    // Dedupe change+confirm (Cocos UI phát cả 2 event cho 1 thao tác)
+    const lastSent = { autoPlay: null, loop: null, pitch: null, volume: null };
     const onToggle = async (event) => {
         const val = event.target ? event.target.value : panel.$.checkbox.value;
+        if (lastSent.autoPlay === !!val) return;
+        lastSent.autoPlay = !!val;
         panel._isAutoPlayEnabled = !!val;
         if (!panel._isAutoPlayEnabled) {
             safePauseOld(panel);
@@ -404,6 +452,8 @@ exports.ready = function() {
 
     const onLoopToggle = async (event) => {
         const val = event.target ? event.target.value : panel.$.loopCheckbox.value;
+        if (lastSent.loop === !!val) return;
+        lastSent.loop = !!val;
         panel._isLoopEnabled = !!val;
         if (panel._currentAudioEl) panel._currentAudioEl.loop = panel._isLoopEnabled;
         try { await Editor.Message.request('auto-play-audio', 'set-loop', panel._isLoopEnabled); } catch (e) {}
@@ -413,6 +463,8 @@ exports.ready = function() {
 
     const onPitchUpdate = async (val) => {
         val = Math.max(0.5, Math.min(2.0, Math.round(Number(val) * 100) / 100));
+        if (lastSent.pitch === val) return;
+        lastSent.pitch = val;
         panel._currentPitch = val;
         if (panel.$.pitchVal) panel.$.pitchVal.textContent = val.toFixed(2) + 'x';
         if (panel.$.pitchSlider) panel.$.pitchSlider.value = val;
@@ -430,10 +482,28 @@ exports.ready = function() {
         panel.$.pitchResetBtn.addEventListener('click', () => onPitchUpdate(1.0));
     }
 
+    const onVolumeUpdate = async (val) => {
+        val = Math.max(0, Math.min(1, Math.round(Number(val) * 100) / 100));
+        if (isNaN(val)) val = 1.0;
+        if (lastSent.volume === val) return;
+        lastSent.volume = val;
+        panel._currentVolume = val;
+        if (panel.$.volumeVal) panel.$.volumeVal.textContent = Math.round(val * 100) + '%';
+        if (panel.$.volumeSlider) panel.$.volumeSlider.value = val;
+        try {
+            await Editor.Message.request('auto-play-audio', 'set-volume', val);
+        } catch (e) {}
+    };
+
+    if (panel.$.volumeSlider) {
+        panel.$.volumeSlider.addEventListener('change', (e) => onVolumeUpdate(e.target.value));
+        panel.$.volumeSlider.addEventListener('confirm', (e) => onVolumeUpdate(e.target.value));
+    }
+
     panel.$.replayBtn.addEventListener('click', async () => {
         if (panel.currentAsset && panel.currentAsset.file) {
             safePauseOld(panel);
-            try { await Editor.Message.request('auto-play-audio', 'play-background-audio', panel.currentAsset.file); } catch (e) {}
+            try { await Editor.Message.request('auto-play-audio', 'play-background-audio', panel.currentAsset.file, true); } catch (e) {}
             syncInspectorPlayer(panel);
         }
     });
@@ -446,10 +516,14 @@ exports.ready = function() {
 
 exports.update = async function(assetList, metaList) {
     const panel = this;
+    const nextUuid = (assetList && assetList.length > 0 && assetList[0].uuid) ? assetList[0].uuid : null;
+    const isSameAsset = nextUuid && nextUuid === panel._lastAssetUuid;
     if (assetList && assetList.length > 0) {
         panel.currentAsset = assetList[0];
+        panel._lastAssetUuid = nextUuid;
     } else {
         panel.currentAsset = null;
+        panel._lastAssetUuid = null;
     }
 
     try {
@@ -467,8 +541,17 @@ exports.update = async function(assetList, metaList) {
             if (panel.$.pitchVal) panel.$.pitchVal.textContent = panel._currentPitch.toFixed(2) + 'x';
             if (panel.$.pitchSlider) panel.$.pitchSlider.value = panel._currentPitch;
         }
+
+        const volVal = await Editor.Message.request('auto-play-audio', 'get-volume');
+        if (typeof volVal === 'number' && !isNaN(volVal)) {
+            panel._currentVolume = Math.max(0, Math.min(1, volVal));
+            if (panel.$.volumeVal) panel.$.volumeVal.textContent = Math.round(panel._currentVolume * 100) + '%';
+            if (panel.$.volumeSlider) panel.$.volumeSlider.value = panel._currentVolume;
+        }
     } catch (e) {}
 
+    // Tránh re-sync gây nháy khi update() fire nhiều lần cho cùng asset
+    if (isSameAsset) return;
     safePauseOld(panel);
     syncInspectorPlayer(panel);
 };
@@ -482,6 +565,7 @@ exports.close = function() {
     safePauseOld(panel);
     panel._currentAudioEl = null;
     panel.currentAsset = null;
+    panel._lastAssetUuid = null;
 
     if (panel._stopDrawing) {
         panel._stopDrawing();
@@ -499,6 +583,7 @@ exports.close = function() {
         if (panel.onAutoPlayChange) Editor.Message.removeBroadcastListener('auto-play-audio:changed', panel.onAutoPlayChange);
         if (panel.onLoopChange) Editor.Message.removeBroadcastListener('auto-play-audio:loop-changed', panel.onLoopChange);
         if (panel.onPitchChange) Editor.Message.removeBroadcastListener('auto-play-audio:pitch-changed', panel.onPitchChange);
+        if (panel.onVolumeChange) Editor.Message.removeBroadcastListener('auto-play-audio:volume-changed', panel.onVolumeChange);
         if (panel.onStopAudio) Editor.Message.removeBroadcastListener('auto-play-audio:stop', panel.onStopAudio);
         if (panel.onPlayAsset) Editor.Message.removeBroadcastListener('auto-play-audio:play-asset', panel.onPlayAsset);
     }

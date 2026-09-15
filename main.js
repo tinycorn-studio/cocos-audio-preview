@@ -1,11 +1,17 @@
 'use strict';
 
 const { BrowserWindow } = require('electron');
+let pathToFileURL = null;
+try {
+    ({ pathToFileURL } = require('url'));
+} catch (e) {}
 
 let isAutoPlayEnabled = true;
 let isLoopEnabled = false;
 let currentPitch = 1.0;
+let currentVolume = 1.0;
 let playerWin = null;
+let playerReady = false;
 let lastPlayedFile = null;
 let lastPlayTime = 0;
 
@@ -24,8 +30,12 @@ async function loadProfile() {
                 isLoopEnabled = loopVal;
             }
             const pitchVal = await Editor.Profile.getConfig('auto-play-audio', 'pitch');
-            if (typeof pitchVal === 'number' && !isNaN(pitchVal) && pitchVal >= 0.25 && pitchVal <= 4.0) {
-                currentPitch = pitchVal;
+            if (typeof pitchVal === 'number' && !isNaN(pitchVal) && pitchVal >= 0.5 && pitchVal <= 2.0) {
+                currentPitch = Math.round(pitchVal * 100) / 100;
+            }
+            const volVal = await Editor.Profile.getConfig('auto-play-audio', 'volume');
+            if (typeof volVal === 'number' && !isNaN(volVal) && volVal >= 0 && volVal <= 1) {
+                currentVolume = volVal;
             }
         }
     } catch (e) {}
@@ -40,6 +50,7 @@ async function saveProfile() {
             await Editor.Profile.setConfig('auto-play-audio', 'autoPlay', isAutoPlayEnabled);
             await Editor.Profile.setConfig('auto-play-audio', 'loop', isLoopEnabled);
             await Editor.Profile.setConfig('auto-play-audio', 'pitch', currentPitch);
+            await Editor.Profile.setConfig('auto-play-audio', 'volume', currentVolume);
         }
     } catch (e) {}
 }
@@ -47,13 +58,27 @@ async function saveProfile() {
 let playSessionSeq = 0;
 
 /**
+ * Chuyển đường dẫn tuyệt đối (Windows/Unicode/space/#) thành file:// URL chuẩn.
+ * Fallback encodeURI thủ công nếu môi trường thiếu url.pathToFileURL.
+ */
+function toFileUrl(filePath) {
+    try {
+        if (pathToFileURL) {
+            return pathToFileURL(filePath).href;
+        }
+    } catch (e) {}
+    return encodeURI('file:///' + String(filePath).replace(/\\/g, '/')).replace(/#/g, '%23');
+}
+
+/**
  * Khởi tạo hoặc lấy BrowserWindow ẩn dùng để phát audio
  * BrowserWindow này có autoplayPolicy: 'no-user-gesture-required' để không bị trình duyệt chặn
  */
 function getPlayerWindow() {
-    if (playerWin && !playerWin.isDestroyed()) {
+    if (playerWin && typeof playerWin.isDestroyed === 'function' && !playerWin.isDestroyed()) {
         return playerWin;
     }
+    playerReady = false;
     playerWin = new BrowserWindow({
         show: false,
         width: 100,
@@ -70,15 +95,21 @@ function getPlayerWindow() {
     // Bắt sự kiện crash để tự động tái tạo window
     playerWin.webContents.on('render-process-gone', (event, details) => {
         console.warn('[Auto Play Audio] Background player crashed, tái khởi tạo...', details.reason);
-        try {
-            if (playerWin && !playerWin.isDestroyed()) playerWin.destroy();
-        } catch (e) {}
+        try { if (playerWin && typeof playerWin.destroy === 'function') playerWin.destroy(); } catch (e) {}
         playerWin = null;
     });
 
     playerWin.on('closed', () => {
         playerWin = null;
+        playerReady = false;
     });
+
+    // Gate: chỉ executeJavaScript sau did-finish-load, tránh race khi vừa tạo window
+    try {
+        playerWin.webContents.once('did-finish-load', () => {
+            playerReady = true;
+        });
+    } catch (e) {}
 
     // Khởi tạo trang HTML với Web Audio API context và bộ điều khiển player chuyên dụng
     const initHtml = `data:text/html;charset=utf-8,<html><body><script>
@@ -95,12 +126,13 @@ function getPlayerWindow() {
  * Phát file âm thanh qua background BrowserWindow sử dụng Web Audio API
  * Có cơ chế Session Token để chống Race Condition khi tap nhanh và giải phóng AudioBuffer
  * @param {string} filePath Đường dẫn tuyệt đối của file âm thanh
+ * @param {boolean} force Bỏ qua debounce cùng-file (dùng cho nút Replay thủ công)
  */
-function playBackground(filePath) {
+function playBackground(filePath, force) {
     if (!filePath || !isAutoPlayEnabled) return;
 
     const now = Date.now();
-    if (lastPlayedFile === filePath && (now - lastPlayTime < 100)) {
+    if (!force && lastPlayedFile === filePath && (now - lastPlayTime < 100)) {
         return;
     }
     lastPlayedFile = filePath;
@@ -109,7 +141,27 @@ function playBackground(filePath) {
 
     try {
         const win = getPlayerWindow();
-        const fileUrl = encodeURI('file:///' + filePath.replace(/\\/g, '/')).replace(/#/g, '%23');
+        const fileUrl = toFileUrl(filePath);
+        const runCode = (code) => {
+            const exec = () => {
+                try {
+                    const p = win.webContents.executeJavaScript(code);
+                    if (p && typeof p.catch === 'function') p.catch(() => {});
+                } catch (e) {}
+            };
+            // Nếu window vừa tạo chưa load xong, đợi did-finish-load rồi mới chạy
+            if (playerReady || (win.webContents && win.webContents.getURL && win.webContents.getURL().indexOf('data:text/html') !== 0)) {
+                exec();
+            } else {
+                try {
+                    win.webContents.once('did-finish-load', exec);
+                    // Safety timeout: nếu sự kiện không tới trong 1.5s vẫn thử chạy
+                    setTimeout(() => { try { exec(); } catch (e) {} }, 1500);
+                } catch (e) {
+                    exec();
+                }
+            }
+        };
         const code = `
             (async function() {
                 var mySession = ${sessionToken};
@@ -159,7 +211,7 @@ function playBackground(filePath) {
                     source.playbackRate.value = ${currentPitch};
 
                     var gain = window._ctx.createGain();
-                    gain.gain.value = 1.0;
+                    gain.gain.value = ${currentVolume};
                     source.connect(gain);
                     gain.connect(window._ctx.destination);
 
@@ -189,13 +241,13 @@ function playBackground(filePath) {
                         window._audioFallback = a;
                         a.loop = ${isLoopEnabled};
                         a.playbackRate = ${currentPitch};
-                        a.volume = 1.0;
+                        a.volume = ${currentVolume};
                         a.play().catch(function(){});
                     } catch(e2) {}
                 }
             })();
         `;
-        win.webContents.executeJavaScript(code).catch(() => {});
+        runCode(code);
     } catch (err) {
         console.error('[Auto Play Audio] Không thể phát âm thanh:', err);
     }
@@ -346,10 +398,12 @@ module.exports = {
 
     unload() {
         stopAudioAll();
-        if (playerWin && !playerWin.isDestroyed()) {
-            playerWin.destroy();
-            playerWin = null;
-        }
+        try {
+            if (playerWin && typeof playerWin.isDestroyed === 'function' && !playerWin.isDestroyed()) {
+                playerWin.destroy();
+            }
+        } catch (e) {}
+        playerWin = null;
         console.log('[Auto Play Audio] Extension đã được gỡ tải.');
     },
 
@@ -382,10 +436,10 @@ module.exports = {
             }
         },
 
-        playBackgroundAudio(filePath) {
-            if (!isAutoPlayEnabled) return;
+        playBackgroundAudio(filePath, force) {
+            if (!isAutoPlayEnabled && !force) return false;
             console.log('[Auto Play Audio] 🎵 Background audio playing:', filePath);
-            playBackground(filePath);
+            playBackground(filePath, !!force);
             return true;
         },
 
@@ -418,7 +472,7 @@ module.exports = {
         async setLoop(val) {
             isLoopEnabled = !!val;
             await saveProfile();
-            if (playerWin && !playerWin.isDestroyed()) {
+            if (playerWin && typeof playerWin.isDestroyed === 'function' && !playerWin.isDestroyed()) {
                 const code = `
                     if (window._source) window._source.loop = ${isLoopEnabled};
                     if (window._audioFallback) window._audioFallback.loop = ${isLoopEnabled};
@@ -437,10 +491,11 @@ module.exports = {
         },
 
         async setPitch(val) {
-            currentPitch = Math.max(0.25, Math.min(4.0, Number(val) || 1.0));
+            // Thống nhất range với Inspector slider: 0.5x - 2.0x
+            currentPitch = Math.max(0.5, Math.min(2.0, Number(val) || 1.0));
             currentPitch = Math.round(currentPitch * 100) / 100;
             await saveProfile();
-            if (playerWin && !playerWin.isDestroyed()) {
+            if (playerWin && typeof playerWin.isDestroyed === 'function' && !playerWin.isDestroyed()) {
                 const code = `
                     if (window._source && window._source.playbackRate && window._ctx) {
                         try {
@@ -462,6 +517,40 @@ module.exports = {
             return currentPitch;
         },
 
+        getVolume() {
+            return currentVolume;
+        },
+
+        async setVolume(val) {
+            currentVolume = Math.max(0, Math.min(1, Number(val)));
+            if (isNaN(currentVolume)) currentVolume = 1.0;
+            currentVolume = Math.round(currentVolume * 100) / 100;
+            await saveProfile();
+            if (playerWin && typeof playerWin.isDestroyed === 'function' && !playerWin.isDestroyed()) {
+                const code = `
+                    if (window._gain && window._ctx) {
+                        try {
+                            window._gain.gain.setValueAtTime(${currentVolume}, window._ctx.currentTime);
+                        } catch(e) {
+                            window._gain.gain.value = ${currentVolume};
+                        }
+                    }
+                    if (window._audioFallback) {
+                        window._audioFallback.volume = ${currentVolume};
+                    }
+                `;
+                try {
+                    const p = playerWin.webContents.executeJavaScript(code);
+                    if (p && typeof p.catch === 'function') p.catch(() => {});
+                } catch (e) {}
+            }
+            if (typeof Editor !== 'undefined' && Editor.Message) {
+                Editor.Message.broadcast('auto-play-audio:volume-changed', currentVolume);
+            }
+            console.log(`[Auto Play Audio] Volume: ${Math.round(currentVolume * 100)}%`);
+            return currentVolume;
+        },
+
         async toggleAutoPlay() {
             const newVal = !isAutoPlayEnabled;
             await this.setAutoPlay(newVal);
@@ -473,6 +562,9 @@ module.exports = {
         },
 
         stopAudio() {
+            // Reset debounce để click lại cùng asset có thể phát ngay
+            lastHandledUuid = null;
+            lastPlayedFile = null;
             stopAudioAll();
             console.log('[Auto Play Audio] Đã dừng âm thanh.');
             return true;
